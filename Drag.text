@@ -1,0 +1,369 @@
+// ==UserScript==
+// @name         YouTube Rotate Flip Zoom Drag (No Pause on Drag)
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Rotate, flip, zoom, drag YouTube video without pausing
+// @match        https://www.youtube.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+  
+  const MIN_SCALE = 0.25;
+  const MAX_SCALE = 4;
+  const SCALE_STEP = 0.08;
+  
+  let scale = 1;
+  let flipX = false;
+  let flipY = false;
+  let rotate = 0; // degrees: 0, 90, 180, 270
+  let tx = 0;
+  let ty = 0;
+  let dragging = false;
+  let dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
+  let videoEl = null;
+  let hasDragged = false;
+  
+  function autoFitVerticalVideo() {
+    if (!videoEl) return;
+    
+    // ตรวจสอบว่าเป็นวิดีโอแนวตั้งหรือไม่
+    const videoWidth = videoEl.videoWidth;
+    const videoHeight = videoEl.videoHeight;
+    
+    if (videoWidth > 0 && videoHeight > 0) {
+      const aspectRatio = videoWidth / videoHeight;
+      
+      console.log(`🎬 Video detected (${videoWidth}x${videoHeight}), aspect ratio: ${aspectRatio.toFixed(3)}`);
+      
+      // ถ้า aspect ratio < 1 = วิดีโอแนวตั้ง
+      // ถ้า aspect ratio > 1 = วิดีโอแนวนอน
+      const isVertical = aspectRatio < 1;
+      
+      if (isVertical) {
+        console.log('📱 Vertical video - will rotate 90° and fit');
+      } else {
+        console.log('📺 Horizontal video - will rotate 90° and fit');
+      }
+      
+      // หมุน 90 องศาเสมอ
+      rotate = 90;
+      
+      // หา container ที่แสดงวิดีโอ - ลองหลายวิธี
+      let container = videoEl.closest('.html5-video-container');
+      if (!container) container = videoEl.closest('#movie_player');
+      if (!container) container = videoEl.closest('.video-stream');
+      if (!container) container = videoEl.parentElement;
+      
+      if (container) {
+        // รอให้ browser render เสร็จ
+        requestAnimationFrame(() => {
+          const containerRect = container.getBoundingClientRect();
+          const containerWidth = containerRect.width;
+          const containerHeight = containerRect.height;
+          
+          console.log(`📦 Container size: ${containerWidth.toFixed(0)}x${containerHeight.toFixed(0)}`);
+          
+          // หลังหมุน 90°:
+          // - ความสูงเดิม (videoHeight) → ความกว้างใหม่
+          // - ความกว้างเดิม (videoWidth) → ความสูงใหม่
+          
+          const scaleForWidth = containerWidth / videoHeight;
+          const scaleForHeight = containerHeight / videoWidth;
+          
+          console.log(`🔢 Scale for width: ${scaleForWidth.toFixed(3)}`);
+          console.log(`🔢 Scale for height: ${scaleForHeight.toFixed(3)}`);
+          
+          // ใช้ค่าที่มากกว่าเพื่อให้เต็มจอ
+          scale = Math.max(scaleForWidth, scaleForHeight);
+          
+          console.log(`✅ Final scale: ${scale.toFixed(3)}x`);
+          console.log(`📐 Result dimensions: ${(videoHeight * scale).toFixed(0)}x${(videoWidth * scale).toFixed(0)}`);
+          
+          // รีเซ็ตตำแหน่ง
+          tx = 0;
+          ty = 0;
+          
+          applyTransform();
+        });
+      }
+    } else {
+      console.warn('⚠️ Video dimensions not available yet');
+    }
+  }
+  
+  // ฟังก์ชันใหม่: fit แบบไม่หมุน (สำหรับวิดีโอที่อยากซูมให้เต็มจอ)
+  function fitToScreen() {
+    if (!videoEl) return;
+    
+    const videoWidth = videoEl.videoWidth;
+    const videoHeight = videoEl.videoHeight;
+    
+    if (videoWidth > 0 && videoHeight > 0) {
+      let container = videoEl.closest('.html5-video-container');
+      if (!container) container = videoEl.closest('#movie_player');
+      if (!container) container = videoEl.parentElement;
+      
+      if (container) {
+        requestAnimationFrame(() => {
+          const containerRect = container.getBoundingClientRect();
+          const containerWidth = containerRect.width;
+          const containerHeight = containerRect.height;
+          
+          const scaleForWidth = containerWidth / videoWidth;
+          const scaleForHeight = containerHeight / videoHeight;
+          
+          // ใช้ค่าที่มากกว่าเพื่อเต็มจอ (crop)
+          scale = Math.max(scaleForWidth, scaleForHeight);
+          
+          tx = 0;
+          ty = 0;
+          
+          console.log(`🎯 Fit to screen: ${scale.toFixed(3)}x`);
+          
+          applyTransform();
+        });
+      }
+    }
+  }
+  
+  function applyTransform() {
+    if (!videoEl) return;
+    
+    const fx = flipX ? -1 : 1;
+    const fy = flipY ? -1 : 1;
+    
+    videoEl.style.transformOrigin = '50% 50%';
+    videoEl.style.transform = `translate(${tx}px, ${ty}px) rotate(${rotate}deg) scale(${scale * fx}, ${scale * fy})`;
+    videoEl.style.userSelect = 'none';
+    videoEl.style.zIndex = 999;
+    videoEl.style.cursor = dragging ? 'grabbing' : 'grab';
+    videoEl.style.transition = dragging ? 'none' : 'transform 0.1s ease-out';
+  }
+  
+  function attach(video) {
+    if (videoEl === video) return; // หลีกเลี่ยง double attach
+    
+    videoEl = video;
+    // reset state
+    scale = 1; 
+    flipX = false; 
+    flipY = false; 
+    rotate = 0; 
+    tx = 0; 
+    ty = 0;
+    hasDragged = false;
+    
+    console.log('🎬 Video controller attached');
+    
+    // รอให้วิดีโอโหลดข้อมูลแล้วตรวจสอบ orientation
+    const tryAutoFit = () => {
+      // รอให้ทั้ง video และ container พร้อม
+      setTimeout(() => {
+        if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+          const aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+          // ถ้า aspect ratio < 1 = วิดีโอแนวตั้ง → auto-fit
+          if (aspectRatio < 1) {
+            console.log('🎯 Auto-detecting vertical video, applying auto-fit...');
+            autoFitVerticalVideo();
+          }
+        } else {
+          console.log('⏳ Waiting for video dimensions...');
+          // ลองอีกครั้งถ้ายังไม่พร้อม
+          setTimeout(tryAutoFit, 200);
+        }
+      }, 200);
+    };
+    
+    if (video.readyState >= 2) { // HAVE_CURRENT_DATA
+      tryAutoFit();
+    } else {
+      video.addEventListener('loadeddata', tryAutoFit, { once: true });
+      video.addEventListener('loadedmetadata', tryAutoFit, { once: true });
+    }
+    
+    // ตรวจสอบเมื่อ video เปลี่ยนขนาดหรือ fullscreen
+    video.addEventListener('resize', () => {
+      if (rotate === 90 || rotate === 270) {
+        console.log('🔄 Video resized, recalculating fit...');
+        setTimeout(() => autoFitVerticalVideo(), 100);
+      }
+    });
+    
+    // ตรวจสอบเมื่อเข้า/ออก fullscreen
+    document.addEventListener('fullscreenchange', () => {
+      if (rotate === 90 || rotate === 270) {
+        console.log('🖥️ Fullscreen changed, recalculating fit...');
+        setTimeout(() => autoFitVerticalVideo(), 300);
+      }
+    });
+    
+    // wheel zoom - ป้องกัน passive listener
+    video.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      
+      if (e.deltaY > 0) {
+        scale = Math.max(MIN_SCALE, scale - SCALE_STEP);
+      } else {
+        scale = Math.min(MAX_SCALE, scale + SCALE_STEP);
+      }
+      applyTransform();
+    }, { passive: false, capture: true });
+    
+    // mousedown - เริ่มลาก
+    video.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return; // เฉพาะคลิกซ้าย
+      
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      
+      dragging = true;
+      hasDragged = false;
+      dragStart = { 
+        x: e.clientX, 
+        y: e.clientY, 
+        tx: tx, 
+        ty: ty 
+      };
+      
+      // เพิ่ม temporary listeners
+      document.addEventListener('mousemove', handleMouseMove, true);
+      document.addEventListener('mouseup', handleMouseUp, true);
+      
+    }, { capture: true });
+    
+    // ป้องกันการ pause จาก click หลังลาก
+    video.addEventListener('click', (e) => {
+      if (hasDragged) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        console.log('🚫 Click blocked after drag');
+      }
+    }, { capture: true });
+    
+    // ป้องกัน context menu
+    video.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+    }, { capture: true });
+    
+    // keyboard shortcuts
+    const keyHandler = (e) => {
+      // เช็คว่าไม่ได้พิมพ์ใน input
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+      if (e.target.isContentEditable) return;
+      
+      const key = e.key.toLowerCase();
+      let changed = false;
+      
+      if (key === 'h') { flipX = !flipX; changed = true; }
+      if (key === 'v') { flipY = !flipY; changed = true; }
+      if (key === '[') { rotate = (rotate - 90) % 360; changed = true; }
+      if (key === ']') { rotate = (rotate + 90) % 360; changed = true; }
+      if (key === 'a') { 
+        // Auto-fit และหมุน 90° (ทำงานกับทุกวิดีโอ)
+        autoFitVerticalVideo();
+        changed = true;
+      }
+      if (key === 's') { 
+        // Fit to screen แบบไม่หมุน (zoom ให้เต็มจอ)
+        fitToScreen();
+        changed = true;
+      }
+      if (key === 'r') { 
+        scale = 1; 
+        flipX = false; 
+        flipY = false; 
+        rotate = 0; 
+        tx = 0; 
+        ty = 0; 
+        changed = true;
+      }
+      
+      if (changed) {
+        e.preventDefault();
+        applyTransform();
+      }
+    };
+    
+    // ลบ listener เก่าก่อนเพิ่มใหม่
+    document.removeEventListener('keydown', keyHandler);
+    document.addEventListener('keydown', keyHandler);
+    
+    applyTransform();
+  }
+  
+  function handleMouseMove(e) {
+    if (!dragging) return;
+    
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    
+    const deltaX = e.clientX - dragStart.x;
+    const deltaY = e.clientY - dragStart.y;
+    
+    // ตรวจสอบว่าได้เลื่อนจริง ๆ
+    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+      hasDragged = true;
+    }
+    
+    tx = dragStart.tx + deltaX;
+    ty = dragStart.ty + deltaY;
+    
+    applyTransform();
+  }
+  
+  function handleMouseUp(e) {
+    if (!dragging) return;
+    
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    
+    dragging = false;
+    
+    // ลบ temporary listeners
+    document.removeEventListener('mousemove', handleMouseMove, true);
+    document.removeEventListener('mouseup', handleMouseUp, true);
+    
+    applyTransform();
+    
+    // รอสักครู่แล้วค่อยรีเซ็ต hasDragged เพื่อให้ click event ถูกบล็อก
+    setTimeout(() => {
+      hasDragged = false;
+    }, 50);
+  }
+  
+  function init() {
+    const video = document.querySelector('video.html5-main-video') || 
+                  document.querySelector('video');
+    
+    if (video && video !== videoEl) {
+      attach(video);
+    }
+  }
+  
+  // Observer สำหรับตรวจจับ video ใหม่
+  const obs = new MutationObserver(() => {
+    init();
+  });
+  
+  obs.observe(document.body, { 
+    childList: true, 
+    subtree: true 
+  });
+  
+  // ตรวจสอบทุกวินาที
+  setInterval(init, 1000);
+  
+  // เรียก init ครั้งแรก
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+  
+  console.log('🚀 YouTube Video Controller loaded');
+  
+})();
